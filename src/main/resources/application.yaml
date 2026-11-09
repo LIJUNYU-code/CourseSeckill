@@ -1,0 +1,93 @@
+spring:
+  application:
+    name: seckill-course
+
+  # 导入本地私密配置（该文件被 .gitignore 忽略，不入版本库）。
+  # optional: 前缀表示文件不存在时不报错——克隆仓库的新人不必先建它就能启动（会跳过需要密码的功能）
+  config:
+    import: optional:application-local.yaml
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/seckill?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
+    username: root
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 压测项目必须显式配连接池：
+    # 默认 HikariCP 的 maximum-pool-size 是 10。500 并发打过来时，
+    # 10 个连接会排队，你会看到"应用 CPU 很低但吞吐上不去"的假象。
+    # 这里的值要配合压测逐步调，不是越大越好——MySQL 端也有 max_connections 上限。
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      connection-timeout: 3000
+      # 这个参数决定了 v0 版本在压测时多久开始报错，值得记住默认值
+      pool-name: SeckillHikari
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+
+  # Redis（阶段 4 起使用：库存预热 + Lua 原子扣减）
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+      lettuce:
+        pool:
+          # Redis 连接池同样要配：Lua 扣减是高频操作，连接数不够会直接体现为 P99 抖动
+          max-active: 50
+          max-idle: 20
+          min-idle: 5
+
+  # RabbitMQ（阶段 5 起使用：异步削峰）
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: ${RABBITMQ_USER:seckill}
+    password: ${RABBITMQ_PASSWORD:}
+    # 手动 ack 是异步消费可靠性的前提，这里先配好，
+    # 阶段 5 写消费者时如果忘了手动 ack，消息会在异常时被静默丢弃
+    listener:
+      simple:
+        acknowledge-mode: manual
+        concurrency: 2
+        max-concurrency: 8
+        prefetch: 10
+
+server:
+  port: 8080
+  # 压测时 Tomcat 的线程模型是瓶颈之一，显式配比默认值更有利于复现和调优
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 20
+
+mybatis-plus:
+  configuration:
+    # 开发期打印 SQL：压测时性能敏感，阶段 6 调优前应改成 false
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+
+jwt:
+  # 未设置环境变量时使用本地默认值（仅开发环境；部署时必须设置强随机 JWT_SECRET）。
+  # 这个默认值解码后是 48 字节，满足 HS256 的 32 字节最低要求。
+  secret: ${JWT_SECRET:c2Vja2lsbC1jb3Vyc2UtZGV2LW9ubHktc2VjcmV0LWJhc2U2NC1zdHJpbmctZm9yLWxvY2FsLXJ1bi0xMjM0}
+  # 2 小时。压测脚本要在 token 过期前跑完，所以别设太短
+  expiration: 7200000
+
+seckill:
+  # ===== 版本切换（本项目核心设计，见文档 §7.3）=====
+  # v0-baseline / v1-db-lock / v2-redis-lua / v3-mq-async / v4-optimize
+  # 改这一行 + 重启，就是另一个版本的实现，不用切分支
+  strategy: v0-baseline
+
+  # 异步下单时排队超时（毫秒）：超时则返回"当前人数过多，请稍后重试"
+  queue-timeout-ms: 3000
+
+logging:
+  level:
+    com.example.seckill: info
+    # 想看 MyBatis 生成的 SQL 时改成 debug（压测前务必改回 info，日志 IO 会影响数据）
+    com.example.seckill.mapper: info

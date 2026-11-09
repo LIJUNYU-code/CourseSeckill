@@ -1,0 +1,32 @@
+# ===================================================================
+# 本地私密配置示例
+# ===================================================================
+#
+# 用法：
+#   1. 复制本文件为 application-local.yaml（同目录下）
+#   2. 把下面的占位值改成你本机的真实值
+#   3. 【绝对不要】把 application-local.yaml 提交进 git
+#      —— .gitignore 已经忽略它，但如果你改了 .gitignore，泄密就只在一瞬间
+#
+# 为什么把密码单独放开，而不是直接写在 application.yaml 里：
+#   application.yaml 是要提交的。一旦提交，密码就永远留在 git 历史里，
+#   即使你后来删掉那一行，任何人 checkout 旧提交都能看到。
+#   项目一曾经踩过这个坑（真实密码进了首次提交，需要重写历史才清干净）。
+#   从第一天就分开，比事后补救便宜一百倍。
+# ===================================================================
+
+spring:
+  datasource:
+    # 本机 MySQL root 密码（填你自己的真实值）
+    password: "你的MySQL密码"
+
+  rabbitmq:
+    # 与 docker run 时 -e RABBITMQ_DEFAULT_PASS=xxx 的值保持一致
+    password: "你的RabbitMQ密码"
+
+  data:
+    redis:
+      # Memurai 默认无密码。若给 Redis 设了密码，在这里填
+      # password: "你的Redis密码"
+      host: localhost
+      port: 6379

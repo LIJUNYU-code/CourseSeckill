@@ -1,0 +1,41 @@
+# ===== 构建产物 =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# ===== 本地私密配置（必须忽略！）=====
+application-local.yaml
+application-local.yml
+.env
+
+# ===== IDE =====
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+.apt_generated
+.sts4-cache
+
+# ===== 前端 =====
+web/node_modules/
+web/dist/
+
+# ===== 压测与本地实验产物 =====
+# k6 报告、压测日志、造数据的中间 SQL 都很大，不入库
+loadtest/results/
+loadtest/*.log
+.tmp-e2e/
+
+# ===== Harness 临时文件 =====
+.dsh-acl-recovery/
+.dsh-write-probe.tmp
+.dsh-vision-router/
+
+# ===== 操作系统 =====
+Thumbs.db
+Desktop.ini
+.DS_Store
