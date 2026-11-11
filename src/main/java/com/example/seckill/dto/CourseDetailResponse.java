@@ -41,4 +41,8 @@ public class CourseDetailResponse {
 
     @Schema(description = "已选人数", example = "0")
     private Integer sold;
+
+    @Schema(description = "当前学生对该课的订单状态；null 表示没选过", example = "1")
+    private Integer myOrderStatus;
+
 }

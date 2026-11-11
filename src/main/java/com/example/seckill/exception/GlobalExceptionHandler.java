@@ -5,6 +5,7 @@ import com.example.seckill.common.Result;
 import com.example.seckill.common.ResultCode;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
@@ -60,5 +61,12 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest()
                 .body(Result.error(ResultCode.BAD_REQUEST,
                         "参数类型不正确: " + e.getName()));
+    }
+
+    @ExceptionHandler(org.springframework.dao.DuplicateKeyException.class)
+    public ResponseEntity<Result<Void>> handleDuplicateKey(DuplicateKeyException e) {
+        log.warn("唯一键冲突: {}", e.getMostSpecificCause().getMessage());
+        return ResponseEntity.status(409)
+                .body(Result.error(ResultCode.CONFLICT, "操作冲突，请勿重复提交"));
     }
 }

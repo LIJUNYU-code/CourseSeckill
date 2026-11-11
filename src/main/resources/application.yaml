@@ -86,6 +86,8 @@ seckill:
   # 异步下单时排队超时（毫秒）：超时则返回"当前人数过多，请稍后重试"
   queue-timeout-ms: 3000
 
+  window-delay-ms: 0
+
 logging:
   level:
     com.example.seckill: info
