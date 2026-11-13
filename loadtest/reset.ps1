@@ -45,7 +45,7 @@ $cnf = Join-Path $env:TEMP ("seckill-mysql-" + [guid]::NewGuid().ToString('N') +
 try {
     $sql = @"
 TRUNCATE TABLE seckill.seckill_order;
-UPDATE seckill.course_stock SET stock = capacity, sold = 0 WHERE course_id = $CourseId;
+UPDATE seckill.course_stock SET stock = capacity, sold = 0, version = 0 WHERE course_id = $CourseId;
 "@
     $sqlFile = Join-Path $env:TEMP ("seckill-reset-" + [guid]::NewGuid().ToString('N') + ".sql")
     [System.IO.File]::WriteAllText($sqlFile, $sql, (New-Object System.Text.UTF8Encoding($false)))

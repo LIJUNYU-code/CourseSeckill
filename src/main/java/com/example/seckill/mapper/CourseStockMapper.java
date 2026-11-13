@@ -22,5 +22,30 @@ public interface CourseStockMapper extends BaseMapper<CourseStock> {
      */
     @Update("UPDATE course_stock SET stock = #{newStock}, sold = sold + 1 WHERE course_id = #{courseId}")
     int absoluteUpdate(@Param("courseId") Long courseId, @Param("newStock") int newStock);
+
+    /**
+     * 条件扣减：判断（stock > 0）与扣减在同一条 SQL 内部完成，数据库保证原子性。
+     *
+     * @return 受影响行数。1 = 扣减成功；0 = 库存不足或课程不存在
+     */
+    @Update("UPDATE course_stock SET stock = stock - 1, sold = sold + 1 " +
+            "WHERE course_id = #{courseId} AND stock > 0")
+    int tryDecrement(@Param("courseId") Long courseId);
+
+    /**
+     * 加排他锁读取库存行。
+     * 必须在一个事务里调用——事务结束（提交或回滚）时锁才释放。
+     */
+    @Select("SELECT * FROM course_stock WHERE course_id = #{courseId} FOR UPDATE")
+    CourseStock selectForUpdate(@Param("courseId") Long courseId);
+
+    /**
+     * 版本号 CAS 扣减：只有当 version 还等于读到的那个值时，扣减才生效。
+     *
+     * @return 受影响行数。1 = 抢到了；0 = 版本已变（别人先改过）或库存不足
+     */
+    @Update("UPDATE course_stock SET stock = stock - 1, sold = sold + 1, version = version + 1 " +
+            "WHERE course_id = #{courseId} AND version = #{version} AND stock > 0")
+    int casDecrement(@Param("courseId") Long courseId, @Param("version") Integer version);
 }
 
