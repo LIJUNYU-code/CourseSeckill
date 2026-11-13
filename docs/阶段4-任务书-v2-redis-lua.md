@@ -84,6 +84,34 @@ return s - 1
 NOSCRIPT No matching script. Please use EVAL.
 ```
 
+### 1.3.1 §6.1 那份脚本本身也验过了（六个分支全覆盖）
+
+上面那个是探针脚本。**任务书 §6.1 要你写的正式脚本我已经完整跑过一遍**，六个分支：
+
+| 前置 | 输入 | 返回 | 说明 |
+|---|---|---|---|
+| `del` key（不存在） | amount=1 | **-1** | 未预热 |
+| `set` key `0` | amount=1 | **-2** | 库存不足 |
+| `set` key `1` | amount=1 | **0** | **正好卖完，不能误判为不足**（这是 `<` 与 `<=` 的分界） |
+| `set` key `3`，连扣 4 次 | amount=1 ×4 | **2 → 1 → 0 → -2** | 第 4 次才拒绝 |
+| `set` key `3` | amount=2 | **1** | `DECRBY` 参数化正确 |
+| `set` key `-5` | amount=1 | **-2** | 脏数据（负数）也被挡住 |
+
+**所以 §6.1 的代码可以直接抄，不用改。**
+
+> 🔴 **但用命令行验它时有个 PowerShell 坑**：`memurai-cli --eval <脚本> <key> , 1`
+> 里的那个**逗号是分隔符，必须加引号**写成 `','`。不加的话 PowerShell 会把
+> `<key> , 1` 当成数组展开，结果 key 变成一个空字符串，脚本里 `GET` 到 nil
+> 之外的东西，报一个和脚本毫无关系的错：
+>
+> ```
+> ERR user_script:8: attempt to compare number with nil
+> ```
+>
+> 我第一次跑就是被这个骗了 —— **看起来像脚本 bug，实际是命令行传参问题**。
+> 这个错误的教训比脚本本身值钱：**报错信息指向的那一行，不一定就是出问题的地方。**
+> 用 Java 调（`StringRedisTemplate.execute`）不存在这个问题，它按参数顺序传。
+
 ### 1.4 🔴 `commons-pool2` 不在 classpath —— 现有连接池配置是死配置
 
 `application.yaml` 第 35-40 行写了：
