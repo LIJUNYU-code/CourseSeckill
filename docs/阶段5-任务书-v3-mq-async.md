@@ -111,30 +111,68 @@ Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe" -WindowStyle H
 结论：**手动 ack 大约是自动 ack 的一半**——因为每条消息多了一次 ack 往返。
 21,598 msg/s 对本项目（100~300 条消息）完全够用，**瓶颈不在这里**。
 
-### 1.3 堆积 20 万条不会触发流控（重要）
+### 1.3 堆积多少条会出问题（重要，且我一开始测错了）
 
-v3 的全部假设是"消息能堆着"。所以我直接把 20 万条灌进去看会不会被掐：
+v3 的全部假设是"消息能堆着"。所以要把"能堆多少"测准。
+
+**⚠️ 先说一次测错的经历，因为它很可能也是你的第一反应。**
+我最初的探针是"灌满 → `queuePurge()` → 读内存"，得到"20 万条只涨 4 MB、300 万条才 197 MB"。
+这个数据是假的：`purge` 之后内存已经还回去了，我读到的是**清空后的残留值**，
+不是堆满时的值。测这种指标必须在**清空之前**读。
+
+改用一个"塞满后不清空、挂住 45 秒、再从外部读 `docker stats`"的探针，才得到可信数字：
 
 ```
-published=200000 in 5124 ms
-queue_depth=199769
-after_purge_depth=0
-内存  168 MB → 172 MB（上限 512 MB）
-流控  BlockedListener 一次都没触发
+基线（队列空）      MEM=141.1MiB / 512MiB    rabbitmqctl Total memory=0.1621 gb
+塞 500000 条并挂住  MEM=234.5MiB / 512MiB    rabbitmqctl Total memory=0.2471 gb
+                    queue depth=500000       CPU=0.21%
 ```
 
-关键参数：
+→ **50 万条持久化消息 ≈ 93.4 MiB ≈ 每条 196 字节**（含 AMQP 帧头、队列索引、per-queue 进程堆开销）。
 
-| 参数 | 值 | 含义 |
+继续加大到 185 万条（同一个探针，每 50 万抽样）：
+
+| 已发消息数 | 内存 | 备注 |
 |---|---|---|
-| `vm_memory_high_watermark` | **0.4** | 内存用到 40%（≈205 MB）开始**阻塞发布者** |
-| `vm_memory_high_watermark_paging_ratio` | 0.5 | 到一半水位开始把消息刷盘 |
-| `disk_free_limit` | 50,000,000（50 MB） | 磁盘低于这个值也会阻塞 |
+| 600,000 | 230.2 MiB | |
+| 1,200,000 | 260.9 MiB | |
+| 1,850,000 | 255.0 MiB | 反而回落 |
 
-⚠️ **风险提示**：当前已用 172 MB，离 205 MB 只有 33 MB。
-20 万条 114 字节的消息只让它涨了 4 MB，说明消息很轻；
-但如果你后面把消息体改大（比如塞进整个课程对象），水位会更快到。
-**真到水位时的症状不是报错，而是 `basicPublish` 卡住不动**——这个坑见 §16 第 9 条。
+发布速率稳定在 **30,212 ~ 30,495 msg/s**（0.5 核的上界），
+全程 `BlockedListener` 一次没触发，`OOMKilled=false`，`RestartCount=0`。
+
+**关键结论：内存随消息数增长是次线性的，并且在 230~260 MiB 附近就饱和了。**
+原因在内存构成里能看出来——`binary` 只占 **0.12%**。
+持久化消息本体落在 `/var/lib/rabbitmq/mnesia/.../msg_stores/*/0.rdq` 这些**磁盘**文件上
+（`queue_index_embed_msgs_below = 4096`，大于这个尺寸的消息不内嵌进索引），
+内存里主要留的是索引和队列进程状态，所以 185 万条也没把容器顶爆。
+
+### 1.3.1 我一开始写的"205 MB 水位"是错的
+
+任务书初稿说"水位 0.4 × 512 MB ≈ 205 MB"，这个算法漏了一个前提。实测：
+
+| 项 | 实测值 |
+|---|---|
+| cgroup 内存上限 | `536870912`（512 MB） |
+| RabbitMQ 认为的机器总内存 | `4107956224`（**3.83 GB**） |
+| `vm_memory_high_watermark` | `0.4` |
+| → 由此算出的水位 | 3.83 GB × 0.4 ≈ **1.53 GB** |
+
+容器里 `MemTotal` 读到的是 **WSL 虚拟机**的大小，不是 cgroup 限制。
+所以 RabbitMQ 算出的 1.53 GB 水位**高于**容器真正的 512 MB 上限——
+水位这个保护**在这个容器里永远不会先触发**。
+
+这带来两个必须知道的后果：
+
+1. **不要指望 `basicPublish` 会"卡住"来提醒你内存到顶了**（§16 第 9 条已按此改正）。
+   本容器更可能的失败方式是**被内核 OOM killer 直接杀掉**，表现为 `docker ps` 里容器消失、
+   `OOMKilled=true`。查法：`docker inspect seckill-rabbitmq --format '{{.State.OOMKilled}} {{.RestartCount}}'`。
+2. 好消息是**按本项目的消息量根本到不了这一步**。100~300 条消息、每条 114 字节，
+   内存增量在一两 MB 量级，属于噪声。真正的风险是"改了消息体，把整个课程对象塞进去"，
+   那也从"每条 196 字节"变成"每条几 KB"，但要堆到 512 MB 仍需几十万条。
+
+**所以 §17「明确不做」里那条"不调 RabbitMQ 内存 CPU 参数"是站得住的**：
+不是因为我们留了余量，而是因为这个量级根本碰不到边界。
 
 ### 1.4 依赖版本（已解析，无需改 pom）
 
@@ -711,7 +749,7 @@ package com.example.seckill.infra.mq;
  * <p>用 record 而不是 @Data 类：消息体一旦发出就不该被修改，
  * record 的不可变性在编译期就挡住了 setter。
  *
- * <p>字段尽量少 —— 消息越大，broker 内存涨得越快（§1.3 的水位只有 205MB）。
+ * <p>字段尽量少 —— 消息越大，broker 内存涨得越快（§1.3 实测每条 196 字节）。
  * 消费者需要的其他数据（课程名等）自己去数据库查。
  */
 public record SeckillMessage(
@@ -1485,11 +1523,14 @@ v3 还要防"少了"——消息丢了、消费失败、死信，都会让成功
    症状：消息在队列里堆着，`consumers=0`，没有任何报错。
    本项目 `com.example.seckill` 是根包，放在 `infra/mq/` 下能被扫到。
 
-9. **broker 内存到水位，`basicPublish` 卡住**
-   §1.3 实测：172 MB / 205 MB 水位。如果 message 体变大或堆积过多，
-   `basicPublish` 会**阻塞不返回**（不报错！）。
-   症状：压测时请求全部 hang 住，没有任何异常日志。
-   `docker stats seckill-rabbitmq` 看内存是不是打到 512MB 上限。
+9. **以为 broker 内存到水位会"卡住"来提醒你**
+   很多资料（包括本任务书的初稿）都说"到水位时 `basicPublish` 阻塞不报错"。
+   **在本机这个容器里不会这样**：`vm_memory_high_watermark` 算的是 WSL 虚拟机的 3.83 GB，
+   水位 1.53 GB 高于容器的 512 MB 上限（§1.3.1 有实测），所以保护永不先触发，
+   更可能是**被内核 OOM 直接杀掉**。
+   症状：`docker ps` 里容器没了，或 `docker inspect` 显示 `OOMKilled=true`。
+   排查第一条永远是：`docker inspect seckill-rabbitmq --format '{{.State.OOMKilled}} {{.RestartCount}}'`。
+   本项目消息量（百条级、每条 114 字节）离这个边界很远，正常情况下不会遇到。
 
 10. **`publisher-returns` 开了但没设 `mandatory`**
     开了 `publisher-returns: true` 只表示"退回的消息会回调到我这里"。
@@ -1600,7 +1641,7 @@ v3 还要防"少了"——消息丢了、消费失败、死信，都会让成功
 
 | 文档原写法 | 实际情况 | 本文档的处理 |
 |---|---|---|
-| "消息体包含 courseName" | 消息体越大 broker 内存涨得越快（水位只有 205MB） | 只放 4 个字段，课程名消费者自己查 |
+| "消息体包含 courseName" | 消息体越大 broker 内存涨得越快（§1.3 实测每条 196 字节） | 只放 4 个字段，课程名消费者自己查 |
 | "消费者用 `@Transactional`" | 内部调用不生效 | 用 `TransactionTemplate` 手动控制（§8.5） |
 | "失败重试 3 次" | 本阶段失败都是代码 bug，重试没用 | 直接进死信（§17） |
 | "用 orderNo 做幂等键" | 一个订单可能发多条消息 | 改用独立 `msgId`（§5.3） |
