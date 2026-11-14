@@ -32,12 +32,7 @@ spring:
       host: localhost
       port: 6379
       timeout: 2000ms
-      lettuce:
-        pool:
-          # Redis 连接池同样要配：Lua 扣减是高频操作，连接数不够会直接体现为 P99 抖动
-          max-active: 50
-          max-idle: 20
-          min-idle: 5
+
 
   # RabbitMQ（阶段 5 起使用：异步削峰）
   rabbitmq:

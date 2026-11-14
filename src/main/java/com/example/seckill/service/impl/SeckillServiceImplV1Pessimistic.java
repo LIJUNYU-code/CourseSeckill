@@ -49,7 +49,6 @@ public class SeckillServiceImplV1Pessimistic implements SeckillService {
             throw new BusinessException(ResultCode.CONFLICT, "课程尚未开放选课");
         }
 
-
         CourseStock stock = courseStockMapper.selectForUpdate(courseId);
         if (stock == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "课程不存在");
