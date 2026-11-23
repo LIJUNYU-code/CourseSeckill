@@ -42,8 +42,11 @@ spring:
     password: ${RABBITMQ_PASSWORD:}
     # 手动 ack 是异步消费可靠性的前提，这里先配好，
     # 阶段 5 写消费者时如果忘了手动 ack，消息会在异常时被静默丢弃
+    publisher-confirm-type: correlated
+    publisher-returns: true
     listener:
       simple:
+        default-requeue-rejected: false
         acknowledge-mode: manual
         concurrency: 2
         max-concurrency: 8
