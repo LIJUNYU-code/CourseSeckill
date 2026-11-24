@@ -27,6 +27,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/api/auth/login").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        .requestMatchers("/", "/index.html", "/favicon.ico", "/assets/**").permitAll()
                         .anyRequest().authenticated())
                 .formLogin(f -> f.disable())
                 .httpBasic(b -> b.disable())
