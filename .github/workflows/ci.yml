@@ -24,52 +24,79 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '25'
           distribution: 'temurin'
           cache: maven
 
-      # mvnw 在 git 里是 100755，Linux 上可直接执行。
       # 用 ./mvnw 而不是 mvn，保证 CI 与本地用同一个 Maven 版本（wrapper 3.10.0）。
+      #
+      # chmod +x 这一行是必要的兜底，不是冗余：
+      # Windows 的 git 默认 core.filemode=false，从不记录可执行位，
+      # 所以 mvnw 很可能以 100644 入库 —— 到了 Linux runner 上执行就报
+      # "Permission denied"、退出码 126，而本地一切正常，很难想到是这个原因。
+      # （本仓库第一次 CI 就是这么挂的。）
+      # 已经在索引里设过 git update-index --chmod=+x mvnw，这里再加一道保险。
+      #
       # set -o pipefail 必须有：不进管道时 tee 的退出码会盖掉 mvn 的失败，
       # 挂掉的测试会被"绿着放过"——这类假绿比直接报错更难查。
       - name: 跑测试
         shell: bash
         run: |
           set -o pipefail
+          chmod +x mvnw
           ./mvnw -B -ntp test 2>&1 | tee build.log
 
       # if: failure() 才跑，把失败原因直接写进 job summary 与 check annotation，
       # 省得每次都去翻几百行日志。
+      #
+      # set +e 是必须的：GitHub 的 shell: bash 默认带 -e -o pipefail，
+      # 而这里全是 grep / ls 这类"查不到就返回非 0"的命令。
+      # 不加 set +e 的话，一旦 build.log 里没有 [ERROR] 行（例如 mvnw 根本没跑起来），
+      # 汇总步骤自己就先挂了，真正的失败原因反而被埋掉。
       - name: 汇总失败原因
         if: failure()
         shell: bash
         run: |
-          echo "## 后端测试失败" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E '^\[ERROR\]' build.log | head -40 >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          set +e
+          {
+            echo "## 后端测试失败"
+            echo '```'
+            if [ -f build.log ]; then
+              grep -E '^\[ERROR\]' build.log | head -40
+            else
+              echo "build.log 不存在 —— 说明 Maven 根本没启动（检查 mvnw 可执行位、JDK 版本）"
+            fi
+            echo '```'
 
-          echo "## 失败用例" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E 'Tests run:.*(Failures: [1-9]|Errors: [1-9])' build.log | head -20 >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "## 失败用例"
+            echo '```'
+            if [ -f build.log ]; then
+              grep -E 'Tests run:.*(Failures: [1-9]|Errors: [1-9])' build.log | head -20
+            fi
+            echo '```'
 
-          echo "## surefire 报告" >> $GITHUB_STEP_SUMMARY
-          ls -1 target/surefire-reports/*.txt 2>/dev/null | head -20 >> $GITHUB_STEP_SUMMARY || echo "（没有生成报告）" >> $GITHUB_STEP_SUMMARY
+            echo "## surefire 报告"
+            echo '```'
+            ls -1 target/surefire-reports/*.txt 2>/dev/null | head -20 || echo "（没有生成报告）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # 前 8 条 [ERROR] 同时输出成 annotation，失败在 commit 页面就能看到
-          grep -E '^\[ERROR\]' build.log | head -8 | while IFS= read -r line; do
-            echo "::error::${line}"
-          done
+          if [ -f build.log ]; then
+            grep -E '^\[ERROR\]' build.log | head -8 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit 0
 
       - name: 上传测试报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
           path: |
@@ -89,10 +116,10 @@ jobs:
     #   3. 页面里绝对不能出现明文密码（演示凭据除外）
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
