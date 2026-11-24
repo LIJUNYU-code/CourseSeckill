@@ -1,0 +1,159 @@
+name: CI
+
+# 为什么只在 push / PR 到 main 时跑：
+# 这个项目的测试是纯单元测试（Mockito + JUnit），不连 MySQL / Redis / RabbitMQ。
+# 集成链路（真的抢课、真的发消息）跑不了 —— 需要三个中间件，GitHub 免费 runner
+# 拉起全部三个要 2~3 分钟且经常因为内存不足挂掉，收益不值得。
+# 并发正确性靠本地压测（见 loadtest/ 与 docs/压测报告*.md），不靠 CI。
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# 同一分支连续 push 时取消上一次未完成的运行，省 runner 时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端测试（JDK 25）
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      # mvnw 在 git 里是 100755，Linux 上可直接执行。
+      # 用 ./mvnw 而不是 mvn，保证 CI 与本地用同一个 Maven 版本（wrapper 3.10.0）。
+      # set -o pipefail 必须有：不进管道时 tee 的退出码会盖掉 mvn 的失败，
+      # 挂掉的测试会被"绿着放过"——这类假绿比直接报错更难查。
+      - name: 跑测试
+        shell: bash
+        run: |
+          set -o pipefail
+          ./mvnw -B -ntp test 2>&1 | tee build.log
+
+      # if: failure() 才跑，把失败原因直接写进 job summary 与 check annotation，
+      # 省得每次都去翻几百行日志。
+      - name: 汇总失败原因
+        if: failure()
+        shell: bash
+        run: |
+          echo "## 后端测试失败" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E '^\[ERROR\]' build.log | head -40 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "## 失败用例" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E 'Tests run:.*(Failures: [1-9]|Errors: [1-9])' build.log | head -20 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "## surefire 报告" >> $GITHUB_STEP_SUMMARY
+          ls -1 target/surefire-reports/*.txt 2>/dev/null | head -20 >> $GITHUB_STEP_SUMMARY || echo "（没有生成报告）" >> $GITHUB_STEP_SUMMARY
+
+          # 前 8 条 [ERROR] 同时输出成 annotation，失败在 commit 页面就能看到
+          grep -E '^\[ERROR\]' build.log | head -8 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: |
+            target/surefire-reports/
+            build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  frontend:
+    name: 前端静态检查（Node 22）
+    runs-on: ubuntu-latest
+
+    # 这个项目的前端是单文件原生 JS（src/main/resources/static/index.html），
+    # 没有构建步骤、没有 npm 依赖。所以这里不做"构建"，只做三件能真的发现问题的事：
+    #   1. HTML 结构性检查（标签是否闭合）
+    #   2. JS 语法检查（node --check）
+    #   3. 页面里绝对不能出现明文密码（演示凭据除外）
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 检查静态页面存在
+        run: |
+          test -f src/main/resources/static/index.html || {
+            echo "::error::找不到 src/main/resources/static/index.html"
+            exit 1
+          }
+          echo "index.html 大小: $(wc -c < src/main/resources/static/index.html) 字节"
+
+      - name: 抽取内联 <script> 并做语法检查
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          html = pathlib.Path('src/main/resources/static/index.html').read_text(encoding='utf-8')
+          blocks = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.S)
+          if not blocks:
+              print('没有内联 script，跳过')
+              sys.exit(0)
+          for i, b in enumerate(blocks):
+              p = pathlib.Path(f'/tmp/inline_{i}.js')
+              p.write_text(b, encoding='utf-8')
+              print(f'写出 {p} （{len(b)} 字符）')
+          PY
+          for f in /tmp/inline_*.js; do
+            echo "--- node --check $f ---"
+            node --check "$f"
+          done
+
+      - name: 检查配置文件里的密码没有硬编码
+        run: |
+          # 不维护"已知坏密码"清单——那等于把真正的密码写进仓库。
+          # 改成结构性检查：application*.yaml 里 password 的值只允许三种形式
+          #   ${...}  占位符      空值      # 注释
+          # 其余一律视为硬编码明文。
+          #
+          # 注意：方括号里不能用 \s —— POSIX ERE 的方括号不认 Perl 转义，
+          # [^\s#] 会被当成"排除 反斜杠/字母s/#"，于是 password: secret 这种
+          # 以 s 开头的密码会被静默漏掉。这里改用 [[:space:]] 和显式字符列表。
+          bad=$(grep -rn -E '^[[:space:]]*([A-Za-z0-9_.-]*password):[[:space:]]*[^$[:space:]#]' \
+                  src/main/resources/*.yaml 2>/dev/null \
+                | grep -v 'application-local' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::配置文件里有硬编码的密码，请改成环境变量占位符"
+            echo "$bad"
+            exit 1
+          fi
+          echo "配置文件的密码均为占位符或空值"
+
+          # 自检：确认上面那条正则真的能抓到明文
+          # （如果将来有人改坏了正则，这一步会立刻报错，而不是静默失去保护）
+          tmp=$(mktemp /tmp/pwcheck.XXXXXX.yaml)
+          echo 'spring:'                        >  "$tmp"
+          echo '  datasource:'                  >> "$tmp"
+          echo '    password: secret-plaintext' >> "$tmp"
+          if grep -q -E '^[[:space:]]*([A-Za-z0-9_.-]*password):[[:space:]]*[^$[:space:]#]' "$tmp"; then
+            echo "正则自检通过：能抓到明文密码"
+          else
+            echo "::error::密码检查正则失效（抓不到 password: secret-plaintext）"
+            rm -f "$tmp"
+            exit 1
+          fi
+          rm -f "$tmp"

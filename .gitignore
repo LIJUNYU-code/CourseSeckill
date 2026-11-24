@@ -30,6 +30,10 @@ loadtest/results/
 loadtest/*.log
 .tmp-e2e/
 
+# 预登录的 token 缓存（不是配置，是一批活的凭据：内含学生真实 JWT，
+# 2 小时内可直接冒充任何学生。绝不允许入库）
+loadtest/lib/tokens-*.json
+
 # ===== Harness 临时文件 =====
 .dsh-acl-recovery/
 .dsh-write-probe.tmp

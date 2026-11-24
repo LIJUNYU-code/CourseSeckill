@@ -1,0 +1,46 @@
+# ===================================================================
+# .dockerignore —— 控制什么进构建上下文
+# ===================================================================
+# 最长的一条放在最前：本地私密配置绝不能进镜像。
+# application-local.yaml 在 .gitignore 里，但 .gitignore 对 docker build 无效，
+# 少这一行"密码进镜像"就发生了，而且镜像层删不掉。
+# ===================================================================
+
+# ===== 私密配置（最重要）=====
+src/main/resources/application-local.yaml
+src/main/resources/application-local.yml
+.env
+*.local
+
+# ===== 构建产物 =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# ===== 前端与压测产物（体积大，且不该进运行时镜像）=====
+web/node_modules/
+web/dist/
+loadtest/results/
+loadtest/*.log
+loadtest/lib/tokens-*.json
+
+# ===== 文档与仓库元数据 =====
+docs/
+.git/
+.github/
+.gitignore
+.gitattributes
+README.md
+
+# ===== IDE 与系统 =====
+.idea/
+*.iml
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ===== 本地临时文件 =====
+.tmp-e2e/
+.dsh-acl-recovery/
+.dsh-write-probe.tmp
+.dsh-vision-router/

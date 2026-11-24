@@ -1,0 +1,142 @@
+# ===================================================================
+# CourseSeckill —— 一键起全栈
+# ===================================================================
+# 用法：
+#   docker compose up -d          启动
+#   docker compose logs -f app    看应用日志
+#   docker compose down           停止（保留数据）
+#   docker compose down -v        停止并删除数据卷（下次启动重新建表造数据）
+# ===================================================================
+
+services:
+
+  # ---------------- MySQL ----------------
+  mysql:
+    image: mysql:8.0
+    container_name: seckill-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-seckill_root_pwd}
+      TZ: Asia/Shanghai
+    command:
+      # utf8mb4：项目里全是中文课程名，默认字符集在部分版本上仍会是 latin1
+      # 绑定 0.0.0.0：容器内 MySQL 默认只监听回环，别的容器连不上
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --bind-address=0.0.0.0
+    ports:
+      - "3307:3306"          # 刻意用 3307，避开本机已装的 MySQL 3306
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 官方镜像会按文件名顺序执行 /docker-entrypoint-initdb.d 下的脚本，
+      # 所以 V1（建表）、V2（造数据）的命名前缀是有意义的，不能改名。
+      - ./sql/V1__init.sql:/docker-entrypoint-initdb.d/V1__init.sql:ro
+      - ./sql/V2__seed_data.sql:/docker-entrypoint-initdb.d/V2__seed_data.sql:ro
+    healthcheck:
+      # mysqladmin ping 只证明进程活着；真正的"能接受连接"要看它返回 mysqld is alive。
+      # 每次初始化要跑 1 万条 INSERT，start-period 给足 60 秒。
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${DB_ROOT_PASSWORD:-seckill_root_pwd}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ---------------- Redis ----------------
+  redis:
+    image: redis:7-alpine
+    container_name: seckill-redis
+    restart: unless-stopped
+    command:
+      # 门禁数据丢了会直接超卖，所以这里开 AOF：
+      # 默认的 RDB 快照最多丢几秒写入，对库存来说是致命的。
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    ports:
+      - "6380:6379"          # 同样避开本机的 6379
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ---------------- RabbitMQ ----------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: seckill-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-seckill}
+      # 没有默认值：必须自己提供，否则 compose 会拒绝启动。
+      # 写死默认密码等于把凭据提交进仓库，而且这个密码往往和本地开发环境真实密码相同。
+      # 用法：在 .env 里写 RABBITMQ_PASSWORD=xxxx，或 export 后 docker compose up -d
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?请先设置 RABBITMQ_PASSWORD（见 .env.example）}
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"
+      - "15672:15672"        # 管理台
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # 用 rabbitmqctl 而不是 curl 管理台：管理台要等插件加载完，
+      # 而队列声明只需要 AMQP 通了就行，用它判断更早也更准。
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 40s
+
+  # ---------------- 应用 ----------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seckill-app
+    restart: unless-stopped
+    depends_on:
+      # condition: service_healthy 而不是只写 depends_on：
+      # 只写 depends_on 的话容器"启动了"就往下走，MySQL 还在初始化表，
+      # 应用会连上去然后因为表不存在直接崩，报错还很难懂。
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # 容器间通信用服务名，不是 localhost
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/seckill?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${DB_ROOT_PASSWORD:-seckill_root_pwd}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-seckill}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?请先设置 RABBITMQ_PASSWORD（见 .env.example）}
+      # JWT 密钥：compose 里的值仅供本地演示。
+      # 真实部署必须换成自己的随机串（Base64 编码后至少 32 字节）。
+      JWT_SECRET: ${JWT_SECRET:-c2Vja2lsbC1jb3Vyc2UtZG9ja2VyLWRlbW8tb25seS1zZWNyZXQtY2hhbmdlLW1l}
+      # 默认跑 v3（异步落单）。想演示其他版本改成 v0-baseline / v1-optimistic 等
+      SECKILL_STRATEGY: ${SECKILL_STRATEGY:-v3-mq-async}
+    ports:
+      - "8080:8080"
+    # 应用启动时 Redis 门禁要预热，容器起来到能服务大约 20~30 秒
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/v3/api-docs"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:

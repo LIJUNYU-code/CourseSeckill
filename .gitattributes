@@ -1,2 +1,33 @@
-/mvnw text eol=lf
+# ===== 换行符统一 =====
+# 仓库内一律存 LF；Windows 上检出时 .cmd/.bat 用 CRLF，其余保持 LF。
+#
+# 为什么不是全用 autocrlf=true 的默认行为：
+# Dockerfile / docker-compose.yml / *.yaml / *.sh 里的 CRLF 会让
+# 容器内 shell 报 "$'\r': command not found"，而且这种错极难看出来。
+# 显式声明比依赖每个人的 git 配置可靠。
+
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析异常
 *.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 这些必须是 LF
+*.sh      text eol=lf
+Dockerfile text eol=lf
+*.dockerignore text eol=lf
+.dockerignore  text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# mvnw 是 POSIX shell 脚本，必须 LF（早先已有，保留）
+/mvnw text eol=lf
+
+# 二进制文件不做换行转换
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
