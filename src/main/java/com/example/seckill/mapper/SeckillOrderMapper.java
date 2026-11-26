@@ -3,7 +3,11 @@ package com.example.seckill.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.example.seckill.entity.SeckillOrder;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
+
+import java.time.LocalDateTime;
+import java.util.List;
 
 
 public interface SeckillOrderMapper extends BaseMapper<SeckillOrder> {
@@ -35,5 +39,16 @@ public interface SeckillOrderMapper extends BaseMapper<SeckillOrder> {
     int updateStatusAndFailReason(@Param("orderNo") String orderNo,
                                   @Param("newStatus") Integer newStatus,
                                   @Param("failReason") String failReason);
+
+    /**
+     * 查出「创建超过 deadline 但仍是待处理」的订单。
+     *
+     * <p>为什么要 LIMIT：清扫是一次批量操作，如果积压了几十万条 PENDING，
+     * 一次性全部捞出来会占满内存、长时间锁住数据库。分批处理，下一轮再捞剩下的。
+     */
+    @Select("SELECT * FROM seckill_order WHERE status = 0 AND create_time < #{deadline} "
+            + "ORDER BY id LIMIT #{limit}")
+    List<SeckillOrder> selectStalePending(@Param("deadline") LocalDateTime deadline,
+                                          @Param("limit") int limit);
 
 }

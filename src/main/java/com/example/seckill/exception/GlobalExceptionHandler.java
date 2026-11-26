@@ -69,4 +69,12 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(409)
                 .body(Result.error(ResultCode.CONFLICT, "操作冲突，请勿重复提交"));
     }
+
+    @ExceptionHandler(org.springframework.web.HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<Result<Void>> handleMethodNotSupported(
+            org.springframework.web.HttpRequestMethodNotSupportedException e) {
+        return ResponseEntity.status(ResultCode.METHOD_NOT_ALLOWED)
+                .body(Result.error(ResultCode.METHOD_NOT_ALLOWED,
+                        "请求方法不支持: " + e.getMethod()));
+    }
 }

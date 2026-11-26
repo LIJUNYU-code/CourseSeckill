@@ -87,8 +87,14 @@ public class SeckillServiceImplV3MqAsync implements SeckillService {
                 }
                 //CANCELLED 或 FAILED 复用旧帐单
                 orderNo = existing.getOrderNo();
-                seckillOrderMapper.updateStatusIfMatch(
+                int claimed = seckillOrderMapper.updateStatusIfMatch(
                         existing.getId(), SeckillOrder.STATUS_PENDING, existing.getStatus());
+                if (claimed == 0) {
+                    // 别人抢先把它改成 PENDING 了（并发双击 / 前端重试）。
+                    // 不能继续：继续就会多发一条消息、多扣一次 Redis。
+                    // 此时 success 仍是 false，finally 里的 incrementIfPresent 会把 Redis 补回去。
+                    throw new BusinessException(ResultCode.CONFLICT, "操作过于频繁，请稍后重试");
+                }
             } else {
                 orderNo = generateOrderNo(studentId);
                 SeckillOrder order = SeckillOrder.builder()

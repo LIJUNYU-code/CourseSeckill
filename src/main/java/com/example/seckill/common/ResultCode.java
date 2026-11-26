@@ -35,6 +35,8 @@ public final class ResultCode {
     public static final int FORBIDDEN = 403;
     /** 资源不存在 */
     public static final int NOT_FOUND = 404;
+    /** 405：请求方法不被该接口支持（如用 GET 调 POST 接口）。 */
+    public static final int METHOD_NOT_ALLOWED = 405;
     /** 冲突：重复提交、状态不允许、库存不足 */
     public static final int CONFLICT = 409;
     /** 请求过于频繁：限流、排队超时 */

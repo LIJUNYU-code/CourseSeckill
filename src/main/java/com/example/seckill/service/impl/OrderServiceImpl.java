@@ -12,14 +12,19 @@ import com.example.seckill.mapper.CourseMapper;
 import com.example.seckill.mapper.SeckillOrderMapper;
 import com.example.seckill.service.OrderService;
 import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @AllArgsConstructor
 @Service
+@Slf4j
 public class OrderServiceImpl implements OrderService {
 
     private final SeckillOrderMapper orderMapper;
@@ -51,19 +56,35 @@ public class OrderServiceImpl implements OrderService {
                     .total(0L).page(page).size(size).records(List.of()).build();
         }
 
-        List<OrderResponse> records = seckillOrderPage.getRecords().stream().map(s ->
-        {
-            Course course = courseMapper.selectById(s.getCourseId());
-            if (course == null) throw new BusinessException(ResultCode.NOT_FOUND, "课程不存在");
-            return OrderResponse.builder().orderNo(s.getOrderNo())
+        List<SeckillOrder> orders = seckillOrderPage.getRecords();
+
+        // 一次性把这一页涉及的课程查出来，用 id → name 的字典代替 N 次查询
+        Set<Long> courseIds = orders.stream()
+                .map(SeckillOrder::getCourseId)
+                .collect(Collectors.toSet());
+        Map<Long, String> courseNameMap = courseMapper.selectByIds(courseIds).stream()
+                .collect(Collectors.toMap(Course::getId, Course::getCourseName));
+
+        List<OrderResponse> records = orders.stream().map(s -> {
+            String courseName = courseNameMap.get(s.getCourseId());
+            if (courseName == null) {
+                // 🔴 课程被删了，不能像原来那样抛 404：
+                //    一门课消失不该让整页订单都打不开（用户会以为自己的选课记录全没了）
+                log.warn("订单关联的课程不存在，用占位名代替 orderNo={} courseId={}",
+                        s.getOrderNo(), s.getCourseId());
+                courseName = "课程已删除";
+            }
+            return OrderResponse.builder()
+                    .orderNo(s.getOrderNo())
                     .courseId(s.getCourseId())
-                    .courseName(course.getCourseName()).failReason(s.getFailReason())
-                    .statusText(getStatusText(s.getStatus())).status(s.getStatus())
+                    .courseName(courseName)
+                    .failReason(s.getFailReason())
+                    .statusText(getStatusText(s.getStatus()))
+                    .status(s.getStatus())
                     .createTime(s.getCreateTime())
                     .updateTime(s.getUpdateTime())
                     .build();
         }).toList();
-
         MyOrderPageResponse myOrderPageResponse = new MyOrderPageResponse();
         myOrderPageResponse.setTotal(seckillOrderPage.getTotal());
         myOrderPageResponse.setPage(page);
@@ -84,7 +105,7 @@ public class OrderServiceImpl implements OrderService {
         if (seckillOrder == null) throw new BusinessException(ResultCode.NOT_FOUND, "暂无选课记录");
 
         if (!seckillOrder.getStudentId().equals(currentId))
-            throw new BusinessException(ResultCode.NOT_FOUND, "暂无选课记录" );
+            throw new BusinessException(ResultCode.NOT_FOUND, "暂无选课记录");
         Course course = courseMapper.selectOne(new LambdaQueryWrapper<Course>().eq(Course::getId, seckillOrder.getCourseId()));
         if (course == null) throw new BusinessException(ResultCode.NOT_FOUND, "暂无选课记录");
         OrderResponse res = OrderResponse.builder().orderNo(orderNo)
