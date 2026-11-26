@@ -93,6 +93,29 @@ Windows 下如果 Maven 依赖走的是自定义镜像，需要显式指定 sett
 > v3 的接口语义是 **HTTP 200 ≠ 已选上**。返回 200 只代表"已受理入队"，
 > 订单状态是 `0 待处理`，1 秒内由消费者改成 `1 已成功`。页面会自动轮询。
 
+### 截图
+
+| 登录 | 学生选课 |
+|---|---|
+| ![登录页](docs/images/01-login.png) | ![学生选课](docs/images/02-student-courses.png) |
+
+| 我的选课（抢课成功后） | 管理员视角 |
+|---|---|
+| ![我的选课](docs/images/04-student-orders-filled.png) | ![管理员](docs/images/05-admin-courses.png) |
+
+两个角色的差别只有一处：管理员看到的是「预热全部库存」按钮 + 卡片下方「仅学生可选」，
+学生看到的是「立即抢课」。权限不靠前端藏按钮，后端 `/api/seckill/**` 有 `@PreAuthorize("hasRole('STUDENT')")`，
+管理员直接调接口会拿到 403。
+
+<details>
+<summary>移动端（390px 宽）与完整长图</summary>
+
+<img src="docs/images/06-mobile-login.png" width="300" alt="移动端登录页">
+
+<img src="docs/images/07-fullpage.png" width="420" alt="完整长图">
+
+</details>
+
 ---
 
 ## 接口
