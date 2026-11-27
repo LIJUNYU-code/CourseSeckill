@@ -29,10 +29,17 @@ services:
       - "3307:3306"          # 刻意用 3307，避开本机已装的 MySQL 3306
     volumes:
       - mysql-data:/var/lib/mysql
-      # 官方镜像会按文件名顺序执行 /docker-entrypoint-initdb.d 下的脚本，
-      # 所以 V1（建表）、V2（造数据）的命名前缀是有意义的，不能改名。
-      - ./sql/V1__init.sql:/docker-entrypoint-initdb.d/V1__init.sql:ro
-      - ./sql/V2__seed_data.sql:/docker-entrypoint-initdb.d/V2__seed_data.sql:ro
+      # 官方镜像按**文件名字母序**执行 /docker-entrypoint-initdb.d 下的脚本。
+      # 🔴 这是个坑：`V1__init.sql` 会排在 `V11__mq_dead_letter.sql` **后面**，
+      #    因为比较到第二个字符时 `_`(0x5F) > `1`(0x31)，即实际顺序是
+      #    V11 → V12 → V1 → V2，V11 先跑而库还不存在 → ERROR 1049 → 初始化中断。
+      # 解法：**挂载目标名自己编号**，与源文件名解耦，让顺序变成明确的 01/02/03/04。
+      - ./sql/V1__init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./sql/V2__seed_data.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      - ./sql/V11__mq_dead_letter.sql:/docker-entrypoint-initdb.d/03-mq-dead-letter.sql:ro
+      - ./sql/V12__index_and_archive.sql:/docker-entrypoint-initdb.d/04-index.sql:ro
+      # 刻意不挂 V10：它是 A8 分表实验脚本，会额外建一个 8 GB 的 seckill_a8 库，
+      # 而且自己带 CREATE DATABASE，跟正常启动无关。要复现实验请手工执行。
     healthcheck:
       # mysqladmin ping 只证明进程活着；真正的"能接受连接"要看它返回 mysqld is alive。
       # 每次初始化要跑 1 万条 INSERT，start-period 给足 60 秒。
@@ -97,7 +104,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: seckill-app
+    # ⚠️ 这里刻意不写 container_name。
+    # container_name 和 `docker compose up --scale app=3` 不能共存：
+    # 名字写死之后第二个副本启动会报
+    #   Conflict. The container name "/seckill-app" is already in use
+    # 不写的话 Docker 会自动命名为 seckill-course-app-1 / -2 / -3。
     restart: unless-stopped
     depends_on:
       # condition: service_healthy 而不是只写 depends_on：
@@ -126,6 +137,22 @@ services:
       JWT_SECRET: ${JWT_SECRET:-c2Vja2lsbC1jb3Vyc2UtZG9ja2VyLWRlbW8tb25seS1zZWNyZXQtY2hhbmdlLW1l}
       # 默认跑 v3（异步落单）。想演示其他版本改成 v0-baseline / v1-optimistic 等
       SECKILL_STRATEGY: ${SECKILL_STRATEGY:-v3-mq-async}
+      # 日志里的实例标识。默认**不注入**，让 Spring 的 ${INSTANCE_ID:${HOSTNAME:local}}
+      # 落到第二层 HOSTNAME（Docker 自动设成容器 ID 前 12 位，三个副本天然不同）。
+      #
+      # ⚠️ 不要写成 `INSTANCE_ID: ${INSTANCE_ID:-}`。那样变量不存在时也会注入一个
+      # **空字符串**，而 Spring 的占位符默认值只在"变量缺失"时生效，"变量为空"时
+      # 直接取空串 —— 日志里会变成 `[] []`，等于标识没起作用（已实测踩到）。
+      #
+      # 想手工命名就把下面这行取消注释，并在 .env 里写 INSTANCE_ID=node-a。
+      # 注意 scale 之后所有副本会共用同一个值，那时反而不如用默认的 HOSTNAME。
+      # INSTANCE_ID: ${INSTANCE_ID}
+    # 端口默认写单个 8080：日常 `docker compose up -d` 就该是 localhost:8080。
+    # 🔴 不要默认写成 "8080-8082:8080"。端口区间在单实例时 Docker 不一定给你区间
+    #    的第一个端口 —— 实测只起 1 个副本时被分配到 8082，于是 localhost:8080
+    #    打不开、healthcheck 之外的访问全部失败，而且没有任何报错提示。
+    # 要跑多实例验收，用 override 文件覆盖成区间（见 docs/阶段9-任务书-多实例正确性.md）：
+    #   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale app=3
     ports:
       - "8080:8080"
     # 应用启动时 Redis 门禁要预热，容器起来到能服务大约 20~30 秒

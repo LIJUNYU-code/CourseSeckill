@@ -38,6 +38,21 @@ docker compose up -d
 > 宿主机端口是 **3307 / 6380 / 5672 / 15672 / 8080**，避开本机常被占用的 3306 和 6379。
 > 要改就看 `docker-compose.yml` 里的 ports，或按 `.env.example` 末尾注释放开对应变量。
 
+#### 跑多实例（可选）
+
+想验证「三个副本同时抢课、同时清扫超时订单」是否正确，用 scale 覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale app=3
+# 三个副本分别占用 8080 / 8081 / 8082，日志前缀 [容器ID前12位] 用来区分是谁
+docker compose -f docker-compose.yml -f docker-compose.scale.yml down   # 停掉
+```
+
+主文件里端口刻意写单个 `8080` 而不是区间：**只起一个副本时 Docker 不保证分配区间的第一个端口**，
+实测会被分到 8082，于是 `localhost:8080` 直接打不开、且没有任何报错。多实例需求因此隔离到
+`docker-compose.scale.yml` 里，那份文件同时把库存对账关掉（`SECKILL_RECONCILE_ENABLE=false`），
+否则对账一边修 Redis 一边影响观测。
+
 ### 方式二：本地跑（需要本机已有 MySQL / Redis / RabbitMQ）
 
 ```bash
@@ -325,11 +340,12 @@ seckill-course/
 │   ├── static/index.html   单页前端
 │   ├── application.yaml
 │   └── sharding.yaml       （v5 遗留，主线未启用）
-├── sql/                 V1 建表 / V2 造数据 / V11 死信表
+├── sql/                 V1 建表 / V2 造数据 / V11 死信表 / V12 索引
 ├── loadtest/            k6 脚本与 PowerShell 工具
 ├── docs/                任务书 + 压测报告 + 截图
 ├── Dockerfile
-└── docker-compose.yml
+├── docker-compose.yml       单实例（端口 8080）
+└── docker-compose.scale.yml 多实例验收用的覆盖文件（端口 8080-8082）
 ```
 
 **版本切换的原理**：6 个实现都 `implements SeckillService`，靠
@@ -344,13 +360,15 @@ seckill-course/
 ./mvnw test
 ```
 
-74 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS、死信落库、库存对账八条主链路的关键分支。
+79 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS、死信落库、库存对账九条主链路的关键分支。
 
 其中课程查询那组（14 条）特意覆盖了两个容易漏的地方：一是**管理员与学生的 id 撞号**（`sys_user.id=1` 恰好等于 `S000000001` 的 id），确保角色判断生效、管理员不会看到学生的选课状态；二是 `listCourses` 只查一次订单表，用调用次数断言守住 N+1。
 
 订单列表那组（7 条）同样用 `verify(times(1)).selectByIds(...)` + `verify(never()).selectById(...)` 钉死 N+1——功能测试抓不住它，因为结果一样对，只有数调用次数才行。
 
-超时清扫那组（9 条）里最值钱的是 `casLost_doesNotReturnRedis`：消费者抢先处理成功后，清扫绝不能把它改成失败、更不能多还一个名额。抢课那组（4 条）钉的是另一处：`updateStatusIfMatch` 返回 0 时必须抛 409、不发消息、并把 Redis 补回去。
+超时清扫那组（11 条）里最值钱的是 `casLost_doesNotReturnRedis`：消费者抢先处理成功后，清扫绝不能把它改成失败、更不能多还一个名额。另外两条专治"测试写了但不咬人"：`deadlineUsesInjectedTimeout` 用 10 分钟超时验证 `minusMinutes(pendingTimeoutMinutes)` 真的用了注入值（只测 5 分钟的话，把参数写死成 5 也照样绿）；`staleQuery_sqlContract` 反射读 `@Select` 注解把 SQL 文本钉死（mapper 被 mock 掉真实 SQL 执行不到，而且拼字符串吃空格的坑只有看文本才抓得住）。
+
+抢课那组（7 条）钉的是两件事：`updateStatusIfMatch` 返回 0 时必须抛 409、不发消息、并把 Redis 补回去；订单号撞 `uk_order_no` 时要换号重试（断言两次的 orderNo 不相等），撞 `uk_student_course` 时绝不能重试（那是"已选过"，重试等于重复下单）。
 
 死信消费者那组（9 条）钉的是"坏消息也必须留下证据"：JSON 解析失败仍要落库、落库失败仍要 ack（否则会无限重投打爆 CPU）、body 超 1000 字符要截断、`reason` 要从 `x-death` 头里读而不是硬编码。库存对账那组（8 条）里最值钱的是 `redisLower_isNeverFixed`——Redis 偏低是安全方向，修了反而会造出超卖。
 
@@ -368,8 +386,10 @@ CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
 4. **没有限流**。1600 RPS 以上是硬崩，不是优雅降级。
 5. **v3 的成功单数无法从 HTTP 层直接数**，只能压测后查库。
 6. **前端是单页 demo**，没有分页组件、没有移动端适配。
-7. **超时清扫的扫描是单表的 `idx_status_start`**。订单表真到千万级时，每分钟一次 `WHERE status=0 AND create_time<? LIMIT 200` 会逐渐变贵，
-   届时应改成按时间分区或把待处理订单单独放一张小表。当前 100 门课 × 1 万学生的量级下扫一次是毫秒级。
+7. **超时清扫的扫描条件与索引**。SQL 是 `WHERE status=0 AND create_time<? AND update_time=create_time LIMIT 200`。
+   `(status, create_time)` 组合索引已补（`sql/V12__index_and_archive.sql`），实测 20 万行时 `type=range`、
+   `key=idx_status_create`、`rows=50`、耗时 0.3~1.1 ms；2 万行时优化器仍选 `PRIMARY`（认为顺序扫更快），
+   这是正常决策，不是索引没建上。订单表真到千万级时应改成按时间分区或把待处理订单单独放一张小表。
 8. **死信只落库不重放**。`mq_dead_letter` 是证据表不是重试队列——需要人工看过原因再决定怎么处理。
    自动重放会引出"重放时库存早没了"的新问题，超出本项目范围。
 9. **对账每轮最多修 20 门课**（`seckill.reconcile-max-fix-per-round`）。Redis 被整体清空时不会一次改 100 个 key，

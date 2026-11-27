@@ -16,6 +16,7 @@ import com.example.seckill.service.SeckillService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -30,6 +31,9 @@ import java.util.concurrent.ThreadLocalRandom;
 @ConditionalOnProperty(name = "seckill.strategy", havingValue = "v3-mq-async")
 public class SeckillServiceImplV3MqAsync implements SeckillService {
 
+    /** 订单号撞 {@code uk_order_no} 时最多换几次号。3 次够：连撞 3 次的概率是 1e-12 量级。 */
+    private static final int ORDER_NO_MAX_ATTEMPTS = 3;
+
     private final CourseMapper courseMapper;
     private final CourseStockMapper courseStockMapper;
     private final SeckillOrderMapper seckillOrderMapper;
@@ -38,9 +42,82 @@ public class SeckillServiceImplV3MqAsync implements SeckillService {
     private final TransactionTemplate transactionTemplate;
 
 
+    /**
+     * 生成订单号：13 位毫秒 + 4 位学号尾 + 4 位随机 = 21 位。
+     *
+     * <p>为什么带学号尾：同毫秒内不同学生的随机数空间仍然是 1/10000，
+     * 但带上学号尾能让"同一学生同一毫秒重复提交"这类最常见的冲突分散到不同前缀上。
+     *
+     * <p>为什么不用 Snowflake：21 位够用，而 Snowflake 需要 workerId，
+     * 多实例部署时 workerId 怎么分配本身就是新问题（写死会撞、动态分配要引入注册中心）。
+     * 撞号概率极低，重试即可，不值得为此引入一套协调机制。
+     */
     private String generateOrderNo(Long studentId) {
         return System.currentTimeMillis() + String.format("%04d", studentId % 10000)
                 + String.format("%04d", ThreadLocalRandom.current().nextInt(10000));
+    }
+
+    /**
+     * 插入订单，如果撞的是 {@code uk_order_no} 就换个号重试。
+     *
+     * <p>为什么需要重试：订单号撞了会抛 {@code DuplicateKeyException}，
+     * 全局异常处理器把它翻成 409 返回给前端，用户看到"订单号重复"完全无法理解，
+     * 而且他这次抢课其实白扣了一个 Redis 名额。换个号重来对用户是无感的。
+     *
+     * <p>为什么要区分是哪个索引撞的：{@code seckill_order} 上有两个唯一索引——
+     * <ul>
+     *   <li>{@code uk_order_no}：订单号撞了，属于意外，换号重试；</li>
+     *   <li>{@code uk_student_course}：这个学生已经选过这门课，属于正常业务分支，
+     *       绝对不能重试（重试一万次也还是撞），应该原样抛出让上层处理。</li>
+     * </ul>
+     *
+     * <p>⚠️ 靠解析异常消息里的索引名判断是脆弱的（MySQL 换版本可能改消息格式）。
+     * 更稳的做法是先查后插，但那样又有竞态窗口。这里的取舍是：
+     * 只在消息里出现 {@code uk_order_no} 时才重试，其它一律不重试——
+     * 万一将来消息格式变了，最坏结果是"撞号时又变回 409"，而不是"重复选课被静默重试"。
+     * 前者是体验问题，后者是正确性问题。
+     */
+    private String insertOrderWithRetry(Long studentId, Long courseId) {
+        for (int attempt = 1; attempt <= ORDER_NO_MAX_ATTEMPTS; attempt++) {
+            String orderNo = generateOrderNo(studentId);
+            SeckillOrder order = SeckillOrder.builder()
+                    .orderNo(orderNo)
+                    .studentId(studentId)
+                    .courseId(courseId)
+                    .status(SeckillOrder.STATUS_PENDING)
+                    .build();
+            try {
+                seckillOrderMapper.insert(order);
+                return orderNo;
+            } catch (DuplicateKeyException e) {
+                if (!isOrderNoConflict(e)) {
+                    // 撞的是 uk_student_course：这个学生真的已经选过这门课了。
+                    // 走到这里说明前面的查重没查到（并发插入），交给上层转成 409。
+                    throw new BusinessException(ResultCode.CONFLICT, "你已选过该课程");
+                }
+                log.warn("订单号撞号，换号重试 attempt={}/{} studentId={} courseId={}",
+                        attempt, ORDER_NO_MAX_ATTEMPTS, studentId, courseId);
+            }
+        }
+        // 连续撞满次数：随机数空间被踩穿了，这不是能靠重试解决的问题
+        log.error("订单号连续 {} 次撞号，放弃 studentId={} courseId={}",
+                ORDER_NO_MAX_ATTEMPTS, studentId, courseId);
+        throw new BusinessException(ResultCode.INTERNAL_ERROR, "系统繁忙，请重试");
+    }
+
+    /**
+     * 判断这个 {@code DuplicateKeyException} 是不是订单号唯一索引撞的。
+     *
+     * <p>MySQL 的原始消息形如
+     * {@code Duplicate entry '179456451615900013418' for key 'seckill_order.uk_order_no'}，
+     * 外层 Spring 包装后仍会保留这段文字。所以只要消息里含 {@code uk_order_no} 就是它。
+     *
+     * <p>消息为 null 时返回 false（保守）：宁可按"重复选课"处理，
+     * 也不要因为判断不出来就去重试一个可能永远撞的索引。
+     */
+    private boolean isOrderNoConflict(DuplicateKeyException e) {
+        String msg = e.getMessage();
+        return msg != null && msg.contains("uk_order_no");
     }
 
     @Override
@@ -96,14 +173,7 @@ public class SeckillServiceImplV3MqAsync implements SeckillService {
                     throw new BusinessException(ResultCode.CONFLICT, "操作过于频繁，请稍后重试");
                 }
             } else {
-                orderNo = generateOrderNo(studentId);
-                SeckillOrder order = SeckillOrder.builder()
-                        .orderNo(orderNo)
-                        .studentId(studentId)
-                        .courseId(courseId)
-                        .status(SeckillOrder.STATUS_PENDING)
-                        .build();
-                seckillOrderMapper.insert(order);
+                orderNo = insertOrderWithRetry(studentId, courseId);
             }
             createdOrderNo = orderNo;
             //发消息

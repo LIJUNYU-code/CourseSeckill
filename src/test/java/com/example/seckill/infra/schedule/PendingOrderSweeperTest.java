@@ -168,6 +168,52 @@ class PendingOrderSweeperTest {
     }
 
     @Test
+    @DisplayName("超时分钟数是注入的，不是写死 5：改成 10 分钟 → deadline=11:50")
+    void deadlineUsesInjectedTimeout() {
+        when(seckillOrderMapper.selectStalePending(any(), anyInt())).thenReturn(List.of());
+
+        newSweeper(10, 200).sweepOnce(LocalDateTime.of(2026, 1, 1, 12, 0));
+
+        ArgumentCaptor<LocalDateTime> captor = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(seckillOrderMapper).selectStalePending(captor.capture(), anyInt());
+        // 只测 5 分钟的话，把 minusMinutes(pendingTimeoutMinutes) 改成 minusMinutes(5)
+        // 也照样是绿的 —— 这条用例专门堵这个洞
+        assertThat(captor.getValue()).isEqualTo(LocalDateTime.of(2026, 1, 1, 11, 50));
+    }
+
+    /**
+     * 🔴 SQL 契约测试：这条用例不看代码逻辑，只看 SQL 文本。
+     *
+     * <p>为什么需要它：阶段 9 加了 {@code update_time = create_time} 这个条件，
+     * 它防的是「清扫把消费者正在处理的订单改成失败、多还一个 Redis 名额」。
+     * 这是个纯 SQL 层的约束，用 Mockito 模拟 mapper 是**测不到**的
+     * （mock 掉了真实的 SQL 执行），所以只能退而求其次——把 SQL 文本本身钉死。
+     *
+     * <p>顺带防一个真实踩过的坑：{@code @Select} 是用 {@code +} 拼字符串的，
+     * 前一段结尾少个空格就会拼出 {@code create_timeORDER BY id}，直接语法错误。
+     * 这种错误编译期发现不了、单测也发现不了（因为 mapper 被 mock 了），
+     * 只有跑起来连数据库才炸。
+     */
+    @Test
+    @DisplayName("🔴 SQL 契约：必须含 update_time = create_time，且拼接处不能吃掉空格")
+    void staleQuery_sqlContract() throws NoSuchMethodException {
+        org.apache.ibatis.annotations.Select select = SeckillOrderMapper.class
+                .getMethod("selectStalePending", LocalDateTime.class, int.class)
+                .getAnnotation(org.apache.ibatis.annotations.Select.class);
+
+        assertThat(select).isNotNull();
+        // @Select 的 value 是 String[]，用 + 拼接时每一段是一个元素，这里先合起来再看
+        String sql = String.join(" ", select.value()).replaceAll("\\s+", " ");
+
+        assertThat(sql).contains("status = 0");
+        assertThat(sql).contains("update_time = create_time");
+        // 拼接处不能粘连：出现过 create_timeORDER BY 这种错误
+        assertThat(sql).contains("create_time ORDER BY id");
+        assertThat(sql).doesNotContain("create_timeORDER");
+        assertThat(sql).contains("LIMIT #{limit}");
+    }
+
+    @Test
     @DisplayName("多条订单：只处理 CAS 成功的，失败的那条跳过")
     void mixedResults_onlySweepsWinners() {
         when(seckillOrderMapper.selectStalePending(any(), anyInt()))

@@ -99,6 +99,17 @@ seckill:
   window-delay-ms: 0
 
 logging:
+  pattern:
+    # 多实例部署时，三份日志会混在一起。Spring Boot 默认格式里的 [seckill-course]
+    # 是应用名（三份完全一样）、3628 是 PID（容器里通常都是 1，反而没有区分度），
+    # 你没法直接对上"这条日志是哪台机器打的"。
+    #
+    # 所以这里加一个实例标识，取值优先级：
+    #   1. INSTANCE_ID 环境变量（想手工命名时用，比如 INSTANCE_ID=node-a）
+    #   2. HOSTNAME —— Docker 会自动把它设成容器 ID 前 12 位，三个副本天然不同
+    #   3. local —— 单机 java -jar 跑时的兜底
+    # 三层嵌套默认值 Spring 是支持的：${a:${b:default}}
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${INSTANCE_ID:${HOSTNAME:local}}] [%thread] %logger{36} - %msg%n"
   level:
     com.example.seckill: info
     # 想看 MyBatis 生成的 SQL 时改成 debug（压测前务必改回 info，日志 IO 会影响数据）

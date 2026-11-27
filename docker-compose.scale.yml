@@ -1,0 +1,30 @@
+# ===================================================================
+# 多实例验收用的 override 文件（日常启动不需要它）
+# ===================================================================
+# 用途：验证「三个副本同时抢课 / 同时清扫」时系统是否仍然正确。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale app=3
+#
+# 为什么不在 docker-compose.yml 里直接写端口区间：
+#   端口区间在只起 1 个副本时，Docker 不保证分配区间里的第一个端口。
+#   实测只起 1 个副本被分到 8082，localhost:8080 直接打不开，且没有任何提示。
+#   所以主文件保持 "8080:8080"，把多实例需求隔离到这个文件里。
+#
+# 注意：这个文件同时会覆盖 SECKILL_RECONCILE_ENABLE 和清扫节奏。
+#   对账（StockReconciler）在压测/多实例验收时必须关掉，否则它会一边修 Redis
+#   一边影响观测；清扫节奏调快是为了在验收时不用等 30 秒。
+# ===================================================================
+
+services:
+  app:
+    # 🔴 `!override` 不能省。
+    # docker compose 合并多个文件时，**列表是追加而不是替换** —— 不写 !override
+    # 的话这里会变成 ["8080:8080", "8080-8082:8080"] 两条并存，第二个副本启动时
+    # 报 `Bind for 0.0.0.0:8080 failed: port is already allocated`。
+    ports: !override
+      - "8080-8082:8080"
+    environment:
+      SECKILL_RECONCILE_ENABLE: "false"
+      SECKILL_PENDING_SWEEP_INITIAL_DELAY_MS: "5000"
+      SECKILL_PENDING_SWEEP_INTERVAL_MS: "5000"
