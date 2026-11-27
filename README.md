@@ -310,7 +310,8 @@ seckill-course/
 │   ├── entity/          6 张表的映射
 │   ├── exception/       BusinessException + 全局异常处理
 │   ├── infra/cache/     StockCacheService（Redis 门禁）
-│   ├── infra/mq/        生产者 / 消费者 / 消息体
+│   ├── infra/mq/        生产者 / 消费者 / 死信消费者 / 消息体
+│   ├── infra/schedule/  PendingOrderSweeper（超时清扫）/ StockReconciler（库存对账）
 │   ├── mapper/          MyBatis-Plus Mapper
 │   ├── security/        JwtUtil + JwtAuthenticationFilter
 │   └── service/impl/    ★ 全部版本策略都在这里
@@ -324,9 +325,9 @@ seckill-course/
 │   ├── static/index.html   单页前端
 │   ├── application.yaml
 │   └── sharding.yaml       （v5 遗留，主线未启用）
-├── sql/                 V1 建表 / V2 造数据
+├── sql/                 V1 建表 / V2 造数据 / V11 死信表
 ├── loadtest/            k6 脚本与 PowerShell 工具
-├── docs/                任务书 + 压测报告
+├── docs/                任务书 + 压测报告 + 截图
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -343,13 +344,15 @@ seckill-course/
 ./mvnw test
 ```
 
-57 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS 七条主链路的关键分支。
+74 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS、死信落库、库存对账八条主链路的关键分支。
 
 其中课程查询那组（14 条）特意覆盖了两个容易漏的地方：一是**管理员与学生的 id 撞号**（`sys_user.id=1` 恰好等于 `S000000001` 的 id），确保角色判断生效、管理员不会看到学生的选课状态；二是 `listCourses` 只查一次订单表，用调用次数断言守住 N+1。
 
 订单列表那组（7 条）同样用 `verify(times(1)).selectByIds(...)` + `verify(never()).selectById(...)` 钉死 N+1——功能测试抓不住它，因为结果一样对，只有数调用次数才行。
 
 超时清扫那组（9 条）里最值钱的是 `casLost_doesNotReturnRedis`：消费者抢先处理成功后，清扫绝不能把它改成失败、更不能多还一个名额。抢课那组（4 条）钉的是另一处：`updateStatusIfMatch` 返回 0 时必须抛 409、不发消息、并把 Redis 补回去。
+
+死信消费者那组（9 条）钉的是"坏消息也必须留下证据"：JSON 解析失败仍要落库、落库失败仍要 ack（否则会无限重投打爆 CPU）、body 超 1000 字符要截断、`reason` 要从 `x-death` 头里读而不是硬编码。库存对账那组（8 条）里最值钱的是 `redisLower_isNeverFixed`——Redis 偏低是安全方向，修了反而会造出超卖。
 
 CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
 
@@ -361,11 +364,18 @@ CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
 2. **RabbitMQ 是单节点容器**（512 MB / 0.5 核）。broker 不会因为水位先阻塞，而是可能被内核 OOM 杀——排查第一步永远是
    `docker inspect seckill-rabbitmq --format '{{.State.OOMKilled}} {{.State.RestartCount}}'`。
 3. **confirm 超时后的窗口期**：超时但消息其实到了，可能导致 Redis 多还一次库存。见 `压测报告-v3.md` §9.1。
+   现在有库存对账兜底（默认 5 分钟一轮），下一轮会把偏高的名额收回。
 4. **没有限流**。1600 RPS 以上是硬崩，不是优雅降级。
 5. **v3 的成功单数无法从 HTTP 层直接数**，只能压测后查库。
 6. **前端是单页 demo**，没有分页组件、没有移动端适配。
 7. **超时清扫的扫描是单表的 `idx_status_start`**。订单表真到千万级时，每分钟一次 `WHERE status=0 AND create_time<? LIMIT 200` 会逐渐变贵，
    届时应改成按时间分区或把待处理订单单独放一张小表。当前 100 门课 × 1 万学生的量级下扫一次是毫秒级。
+8. **死信只落库不重放**。`mq_dead_letter` 是证据表不是重试队列——需要人工看过原因再决定怎么处理。
+   自动重放会引出"重放时库存早没了"的新问题，超出本项目范围。
+9. **对账每轮最多修 20 门课**（`seckill.reconcile-max-fix-per-round`）。Redis 被整体清空时不会一次改 100 个 key，
+   代价是极端情况下要几轮才能全部修正。
+10. **压测时必须关对账**：`--seckill.reconcile-enable=false`。对账会 `preheat` 覆盖 Redis，
+    压测中改 Redis 会让 `stock` 读数不可信。
 
 ---
 

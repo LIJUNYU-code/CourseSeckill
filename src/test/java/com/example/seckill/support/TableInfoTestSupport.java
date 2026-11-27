@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.example.seckill.entity.Course;
 import com.example.seckill.entity.CourseStock;
 import com.example.seckill.entity.MqConsumeLog;
+import com.example.seckill.entity.MqDeadLetter;
 import com.example.seckill.entity.SeckillOrder;
 import com.example.seckill.entity.Student;
 import com.example.seckill.entity.SysUser;
@@ -50,5 +51,6 @@ public final class TableInfoTestSupport {
         TableInfoHelper.initTableInfo(assistant, CourseStock.class);
         TableInfoHelper.initTableInfo(assistant, SeckillOrder.class);
         TableInfoHelper.initTableInfo(assistant, MqConsumeLog.class);
+        TableInfoHelper.initTableInfo(assistant, MqDeadLetter.class);
     }
 }
