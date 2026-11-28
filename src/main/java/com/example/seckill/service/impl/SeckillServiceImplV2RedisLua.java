@@ -57,11 +57,12 @@ public class SeckillServiceImplV2RedisLua implements SeckillService {
                 .getAuthentication().getPrincipal();
 
         // ---------- 第 2 步：Lua 扣 Redis ----------
+        //Redis 门禁
         Long left = stockCacheService.tryDecrement(courseId);
         if (left == -1L) {
-            // 未预热：现场预热后只重试一次（不循环！Redis 挂了会死循环打爆自己）
-            log.warn("Redis 未预热，现场预热 courseId={}", courseId);
-            stockCacheService.preheat(courseId);
+            // 冷启动：并发下只让第一个请求写，其余跳过。用 SETNX 不用 SET，
+            // 否则后写的会把前面已经扣减的库存重置回满额（阶段 11 修的缺陷）。
+            stockCacheService.preheatIfAbsent(courseId);
             left = stockCacheService.tryDecrement(courseId);
         }
         if (left == -2L) {

@@ -164,6 +164,58 @@ class StockCacheServiceImplTest {
         verify(stringRedisTemplate, never()).opsForValue();
     }
 
+    // ==================== preheatIfAbsent：阶段 11 冷启动惊群修复 ====================
+
+    @Test
+    @DisplayName("preheatIfAbsent：key 不存在 → 用 SETNX 写入 stock（不是 capacity）")
+    void preheatIfAbsent_keyMissing_writesWithSetnx() {
+        // 数据同样故意让 capacity != stock：写错成 capacity 会立刻测出来。
+        CourseStock stockRow = CourseStock.builder()
+                .courseId(88L).capacity(100).stock(37).sold(63).version(0)
+                .build();
+        when(courseStockMapper.selectByCourseId(88L)).thenReturn(stockRow);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.setIfAbsent("seckill:stock:88", "37")).thenReturn(true);
+
+        stockCacheService.preheatIfAbsent(88L);
+
+        verify(valueOps).setIfAbsent("seckill:stock:88", "37");
+        // 🔴 反向断言：这条是阶段 11 的核心。只要这里用了覆盖写 set()，
+        //    冷启动时后到的请求就会把前面已经扣减的库存重置回满额，名额复活 → 超额受理。
+        //    把 never() 钉在这里，谁把 SETNX 改回 SET，单测立刻变红。
+        verify(valueOps, never()).set(any(), any());
+    }
+
+    @Test
+    @DisplayName("preheatIfAbsent：key 已存在 → SETNX 返回 false，一个字节都不写")
+    void preheatIfAbsent_keyExists_doesNotOverwrite() {
+        // 这个场景就是惊群的现场：第一个请求已经写好了（可能还扣过了），
+        // 后面 199 个请求也走进 -1 分支，此时必须什么都不做。
+        CourseStock stockRow = CourseStock.builder()
+                .courseId(88L).capacity(100).stock(100).sold(0).version(0)
+                .build();
+        when(courseStockMapper.selectByCourseId(88L)).thenReturn(stockRow);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.setIfAbsent("seckill:stock:88", "100")).thenReturn(false);
+
+        stockCacheService.preheatIfAbsent(88L);
+
+        verify(valueOps).setIfAbsent("seckill:stock:88", "100");
+        // 返回 false 说明 key 已存在，此时若再调 set() 就是覆盖写，等于把库存拉回满额。
+        verify(valueOps, never()).set(any(), any());
+    }
+
+    @Test
+    @DisplayName("preheatIfAbsent：库存行不存在 → 跳过，不碰 Redis")
+    void preheatIfAbsent_stockRowMissing_skips() {
+        when(courseStockMapper.selectByCourseId(99999L)).thenReturn(null);
+
+        stockCacheService.preheatIfAbsent(99999L);
+
+        // 不打桩 opsForValue() 也不会 NPE，证明真的在查库后就 return 了。
+        verify(stringRedisTemplate, never()).opsForValue();
+    }
+
     @Test
     @DisplayName("全量预热 → 每门课写一条，条数等于查到的行数")
     void preheatAll_writesEveryCourse() {

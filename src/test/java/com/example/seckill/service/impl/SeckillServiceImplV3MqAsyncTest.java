@@ -277,6 +277,33 @@ class SeckillServiceImplV3MqAsyncTest {
         verify(stockCacheService, times(1)).incrementIfPresent(COURSE_ID);
     }
 
+    // ==================== 用例 7：冷启动走补缺预热（阶段 11）====================
+
+    @Test
+    @DisplayName("🔴 冷启动（Lua 返回 -1）：必须调 preheatIfAbsent 而不是 preheat，然后重试一次")
+    void seckill_coldStart_usesPreheatIfAbsentAndRetries() {
+        // 这条钉的是调用点，不是实现：preheatIfAbsent 本身写对了，
+        // 但调用点写成 preheat(courseId) 的话，冷启动照样是覆盖写 → 惊群没修好。
+        // 实现层的单测（StockCacheServiceImplTest）抓不到这个错，只有这里能抓。
+        when(courseMapper.selectById(COURSE_ID)).thenReturn(openCourse());
+        // 第一次 -1（未预热），预热后第二次 99（扣减成功）
+        when(stockCacheService.tryDecrement(COURSE_ID)).thenReturn(-1L, 99L);
+        when(seckillOrderMapper.selectOne(any())).thenReturn(cancelledOrder());
+        when(seckillOrderMapper.updateStatusIfMatch(
+                any(), any(Integer.class), any(Integer.class))).thenReturn(1);
+        when(messageProducer.send(any(SeckillMessage.class))).thenReturn(true);
+
+        SeckillResponse res = service.seckill(COURSE_ID);
+
+        assertThat(res.getStatus()).isEqualTo(SeckillOrder.STATUS_PENDING);
+        // 补缺预热被调了 1 次
+        verify(stockCacheService, times(1)).preheatIfAbsent(COURSE_ID);
+        // 🔴 覆盖写预热一次都不许调 —— 这是阶段 11 的全部要害
+        verify(stockCacheService, never()).preheat(any());
+        // 预热后必须重试扣减，否则白预热
+        verify(stockCacheService, times(2)).tryDecrement(COURSE_ID);
+    }
+
     @Test
     @DisplayName("订单号连续撞满 3 次：放弃并抛 500（随机数空间被踩穿，重试已无意义）")
     void seckill_orderNoCollisionExhausted_throwsInternalError() {

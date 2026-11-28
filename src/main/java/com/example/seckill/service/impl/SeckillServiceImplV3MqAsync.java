@@ -137,7 +137,9 @@ public class SeckillServiceImplV3MqAsync implements SeckillService {
         //Redis 门禁
         Long left = stockCacheService.tryDecrement(courseId);
         if (left == -1L) {
-            stockCacheService.preheat(courseId);
+            // 冷启动：并发下只让第一个请求写，其余跳过。用 SETNX 不用 SET，
+            // 否则后写的会把前面已经扣减的库存重置回满额（阶段 11 修的缺陷）。
+            stockCacheService.preheatIfAbsent(courseId);
             left = stockCacheService.tryDecrement(courseId);
         }
         if (left == -2L) {

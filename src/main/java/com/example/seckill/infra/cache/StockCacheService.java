@@ -39,4 +39,12 @@ public interface StockCacheService {
     void clear(Long courseId);
     /** 归还名额，但仅在 key 已存在时。用于退课场景。 */
     void incrementIfPresent(Long courseId);
+
+    /**
+     * 仅在 key 不存在时写入。用于抢课冷启动，避免惊群。
+     * <p>
+     * 与 {@link #preheat(Long)} 的区别：那个是"覆盖"，这个是"补缺"。
+     * 对账与管理端要覆盖（收回虚报名额），抢课要补缺（并发时只让一个人写）。
+     */
+    void preheatIfAbsent(Long courseId);
 }

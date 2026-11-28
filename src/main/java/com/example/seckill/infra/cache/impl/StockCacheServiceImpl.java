@@ -95,4 +95,20 @@ public class StockCacheServiceImpl implements StockCacheService {
         }
         stringRedisTemplate.opsForValue().increment(key);
     }
+
+    @Override
+    public void preheatIfAbsent(Long courseId) {
+        CourseStock stock = courseStockMapper.selectByCourseId(courseId);
+        if (stock == null) {
+            log.warn("预热跳过：课程库存行不存在 courseId={}", courseId);
+            return;
+        }
+        Boolean written = stringRedisTemplate.opsForValue()
+                .setIfAbsent(stockKey(courseId), String.valueOf(stock.getStock()));
+        if (Boolean.TRUE.equals(written)) {
+            log.info("预热完成（冷启动） courseId={} stock={}", courseId, stock.getStock());
+        } else {
+            log.debug("预热跳过：已由其它请求写入 courseId={}", courseId);
+        }
+    }
 }
