@@ -360,7 +360,7 @@ seckill-course/
 ./mvnw test
 ```
 
-79 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS、死信落库、库存对账九条主链路的关键分支。
+99 条，覆盖库存扣减、幂等、退课、课程查询、订单列表、超时清扫、抢课 CAS、死信落库、库存对账、限流十条主链路的关键分支。
 
 其中课程查询那组（14 条）特意覆盖了两个容易漏的地方：一是**管理员与学生的 id 撞号**（`sys_user.id=1` 恰好等于 `S000000001` 的 id），确保角色判断生效、管理员不会看到学生的选课状态；二是 `listCourses` 只查一次订单表，用调用次数断言守住 N+1。
 
@@ -371,6 +371,8 @@ seckill-course/
 抢课那组（7 条）钉的是两件事：`updateStatusIfMatch` 返回 0 时必须抛 409、不发消息、并把 Redis 补回去；订单号撞 `uk_order_no` 时要换号重试（断言两次的 orderNo 不相等），撞 `uk_student_course` 时绝不能重试（那是"已选过"，重试等于重复下单）。
 
 死信消费者那组（9 条）钉的是"坏消息也必须留下证据"：JSON 解析失败仍要落库、落库失败仍要 ack（否则会无限重投打爆 CPU）、body 超 1000 字符要截断、`reason` 要从 `x-death` 头里读而不是硬编码。库存对账那组（8 条）里最值钱的是 `redisLower_isNeverFixed`——Redis 偏低是安全方向，修了反而会造出超卖。
+
+限流那组（20 条）分三层：`RateLimitServiceImplTest`（7 条）测脚本返回值解析与 fail-open，`RateLimitFilterTest`（10 条）测路径过滤与两层桶，`RateLimitLuaScriptTest`（3 条）测 Lua 文本契约。最后一类看着奇怪但必须存在——**Lua 脚本在单测里一行都不会执行**（`StringRedisTemplate` 是 mock 的），所以"把 `math.floor(tokens)` 写回 Redis 把桶削成一半"这种改动，Java 侧断言照样全绿，只能靠钉文本。变异测试里专门把这句话加回去验证它确实会变红。
 
 CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
 
@@ -383,7 +385,8 @@ CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
    `docker inspect seckill-rabbitmq --format '{{.State.OOMKilled}} {{.State.RestartCount}}'`。
 3. **confirm 超时后的窗口期**：超时但消息其实到了，可能导致 Redis 多还一次库存。见 `压测报告-v3.md` §9.1。
    现在有库存对账兜底（默认 5 分钟一轮），下一轮会把偏高的名额收回。
-4. **没有限流**。1600 RPS 以上是硬崩，不是优雅降级。
+4. ~~**没有限流**。1600 RPS 以上是硬崩，不是优雅降级。~~ **已解决**（阶段 10）：令牌桶 Lua + Servlet `Filter`，全局 2000/1500、每学生 5/1，Redis 异常时 fail-open。见 `压测报告-限流.md`。
+   实测 1200 RPS 下零误伤、被拦请求 P95 仅 1 ms（放行的 105 ms）。
 5. **v3 的成功单数无法从 HTTP 层直接数**，只能压测后查库。
 6. **前端是单页 demo**，没有分页组件、没有移动端适配。
 7. **超时清扫的扫描条件与索引**。SQL 是 `WHERE status=0 AND create_time<? AND update_time=create_time LIMIT 200`。
@@ -396,6 +399,13 @@ CI 在 `.github/workflows/ci.yml`：每次 push 跑编译 + 全部测试。
    代价是极端情况下要几轮才能全部修正。
 10. **压测时必须关对账**：`--seckill.reconcile-enable=false`。对账会 `preheat` 覆盖 Redis，
     压测中改 Redis 会让 `stock` 读数不可信。
+11. 🔴 **冷启动时缓存预热会惊群**。`preheat()` 是 `SET` 覆盖写，冷启动瞬间几十个并发请求同时判断
+    "key 不存在"然后各自预热，会把已扣减的库存重置回满额 → Redis 门禁被击穿（实测 capacity=100
+    时受理了 299 个），最终靠消费者事务与唯一索引兜住、没有超卖，但用户会看到"系统繁忙"。
+    有意思的是**决定后果的不是预热次数，而是预热的离散度**：不加限流时预热 200 次、全挤在 3 ms 内，
+    受理数精确等于 100；加了限流后预热只剩 115 次、却摊在 20 ms 里，受理数反而涨到 299——
+    限流把请求摊开，`SET` 和 `DECRBY` 交错，才真的让名额复活。
+    压测前先手动 `SET seckill:stock:<id> <stock>` 可规避；根治方案见 `压测报告-限流.md` §5.7。
 
 ---
 

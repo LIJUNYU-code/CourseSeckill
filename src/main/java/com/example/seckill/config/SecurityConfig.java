@@ -3,6 +3,7 @@ package com.example.seckill.config;
 import com.example.seckill.common.Result;
 import com.example.seckill.common.ResultCode;
 import com.example.seckill.security.JwtAuthenticationFilter;
+import com.example.seckill.security.RateLimitFilter;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -20,7 +21,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter, ObjectMapper objectMapper) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter, RateLimitFilter rateLimitFilter, ObjectMapper objectMapper) throws Exception {
         http
                 .csrf(c -> c.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))       //  不存 session
@@ -43,7 +44,12 @@ public class SecurityConfig {
                             objectMapper.writeValue(res.getWriter(),
                                     Result.error(ResultCode.FORBIDDEN, "无权访问"));
                         }))
-                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                // 限流必须排在 JWT 之后：它要读 SecurityContextHolder 里的 studentId 做每学生桶。
+                // 挂在 JWT 之前的话 currentStudentId() 永远是 null，所有请求被当成同一个匿名桶。
+                // 注意：下面 rateLimitFilterRegistration 只负责关掉 Servlet 容器的自动注册
+                //（不关会执行两次，令牌消耗翻倍），真正把它挂进链的是这一行。
+                .addFilterAfter(rateLimitFilter, JwtAuthenticationFilter.class);
         return http.build();
 
     }
@@ -53,5 +59,12 @@ public class SecurityConfig {
         var reg = new FilterRegistrationBean<>(f);
         reg.setEnabled(false);
         return reg;
+    }
+
+    @Bean
+    public FilterRegistrationBean<RateLimitFilter> rateLimitFilterRegistration(RateLimitFilter rateLimitFilter) {
+        FilterRegistrationBean<RateLimitFilter> registration = new FilterRegistrationBean<>(rateLimitFilter);
+        registration.setEnabled(false);
+        return registration;
     }
 }

@@ -93,10 +93,15 @@ seckill:
   # 应用启动后多久开始第一轮。给消费者留出就绪时间，避免误杀在途订单
   pending-sweep-initial-delay-ms: 30000
 
-  # 异步下单时排队超时（毫秒）：超时则返回"当前人数过多，请稍后重试"
-  queue-timeout-ms: 3000
-
-  window-delay-ms: 0
+  # ==================== 限流（阶段 10）====================
+  # 总开关：压测对比实验要关掉它跑一遍基线，所以必须能一键关闭
+  rate-limit-enabled: true
+  # 全局桶：保护系统不崩。refill 必须低于系统真实容量（README 记的 1600 RPS 是零失败极限，不是安全运行点）
+  rate-limit-global-capacity: 2000
+  rate-limit-global-refill-per-second: 1500
+  # 每学生桶：防单个学生刷接口。capacity=5 表示允许一瞬间连点 5 次，之后每秒 1 次
+  rate-limit-student-capacity: 5
+  rate-limit-student-refill-per-second: 1
 
 logging:
   pattern:

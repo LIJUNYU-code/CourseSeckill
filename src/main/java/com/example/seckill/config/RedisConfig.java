@@ -1,9 +1,12 @@
 package com.example.seckill.config;
 
+import com.example.seckill.infra.cache.RateLimitLuaScript;
 import com.example.seckill.infra.cache.StockLuaScript;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+
+import java.util.List;
 
 /**
  * Redis 相关 Bean。
@@ -28,6 +31,14 @@ public class RedisConfig {
         script.setScriptText(StockLuaScript.DECREMENT);
         // 不设这一行，execute 的返回值是 Object，赋值给 Long 时编译不过
         script.setResultType(Long.class);
+        return script;
+    }
+
+    @Bean
+    public DefaultRedisScript<List> rateLimitScript(){
+        DefaultRedisScript<List> script = new DefaultRedisScript<>();
+        script.setScriptText(RateLimitLuaScript.TOKEN_BUCKET);
+        script.setResultType(List.class);
         return script;
     }
 }
